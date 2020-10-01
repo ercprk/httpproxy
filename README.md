@@ -1,5 +1,9 @@
 # HTTP Proxy
 
+## Specifications
+
+1. Only supports IPv4.
+
 ## Requirements
 
 ### HTTP Header Parsing

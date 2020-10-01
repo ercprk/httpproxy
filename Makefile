@@ -15,17 +15,17 @@
 #
 
 # Preliminary
-GCC = gcc
-#GCCFLAGS =
-# INCLUDES =
+CC = gcc
+CLIBS = nsl
+CFLAGS = -g -l $(CLIBS)
 
 all: httpproxy
 
 #
 # Build the httpproxy
 #
-httpproxy:
-	$(GCC) main.c
+httpproxy: main.c
+	$(CC) $(CFLAGS) -o httpproxy main.c
 
 #
 # Delete all compiled code in preparation
