@@ -1,0 +1,3 @@
+PUT: Networks\OBJECT: Tufts University Spring 2020\MAX-AGE: 10
+GET: Networks
+GET: Hello
