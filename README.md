@@ -4,6 +4,8 @@
 
 1. Only supports IPv4.
 
+2. Only handles GET requests.
+
 ## Requirements
 
 ### HTTP Header Parsing
