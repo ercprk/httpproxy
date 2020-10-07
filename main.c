@@ -34,8 +34,11 @@ unsigned getPortNumber(int argc, char **argv);
 Cache *createCache();
 void deleteCache(Cache *cache);
 void serveClient(int sockfd);
-char *handleRequest(char *request, char *response);
-char *queryServer(char *host, char *request, char *response);
+void handleRequest(char *request, char *response);
+void queryServer(char *host, char *request, char *response);
+void putIntoCache(Cache *cache, char *key, char *response);
+void getFromCache(Cache *cache, char *key, char *response);
+void printCache(Cache *cache);
 
 #define MAX_URL_LENGTH 100
 #define MAX_CONTENT_SIZE 1000000 // 10MB
@@ -217,7 +220,9 @@ serveClient(int sockfd)
     printf("[httpproxy] Read from the connection\n");
 
     // Handle request
+    bzero(response, MAX_CONTENT_SIZE);
     handleRequest(request, response);
+    printf("response: %s\n", response);
 
     // Write response to the connection
     if (write(client_sockfd, response, MAX_CONTENT_SIZE) < 0)
@@ -241,8 +246,8 @@ serveClient(int sockfd)
 // Arguments : char * of request and char * of response
 // Does      : 1) parses the request
 //             2) handles the request appropriately and fills up response
-// Returns   : char * of response
-char *
+// Returns   : nothing
+void
 handleRequest(char *request, char *response)
 {
     char *line, *key, *host;
@@ -274,16 +279,14 @@ handleRequest(char *request, char *response)
     queryServer(host, request, response);
 
     free(str); // for malloc() within strdup()
-
-    return response;
 }
 
 // Function  : queryServer
 // Arguments : char * of request and char * of <hostname>:<portnumber>
 // Does      : 1) queries the server of the hostname with the request
 //             2) fills up/returns the response from the server
-// Returns   : char * of response
-char *
+// Returns   : nothing
+void
 queryServer(char *host, char *request, char *response)
 {
     int sockfd;
@@ -316,7 +319,8 @@ queryServer(char *host, char *request, char *response)
     {
         fprintf(stderr, "[httpproxy] No such host as %s\n", hostname);
         fprintf(stderr, "[httpproxy] h_errno: %d\n", h_errno);
-        exit(EXIT_FAILURE);
+        strcpy(response, "No such host indicated by the hostname\n");
+        return;
     }
 
     // Build the server's Internet address
@@ -330,28 +334,49 @@ queryServer(char *host, char *request, char *response)
     if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr))
         < 0) 
     {
-        fprintf(stderr, "[httpproxy] Failed to connect to %s\n", hostname);
-        exit(EXIT_FAILURE);
+        fprintf(stderr, "[httpproxy] Failed to connect to %s on port %ld\n",
+                hostname, portNum);
+        strcpy(response, "Failed to connect to the host\n");
+        return;
     }
 
     // Send the HTTP request to the server
     if(write(sockfd, request, strlen(request)) < 0)
-    {
         fprintf(stderr, "[httpproxy] Failed to write to %s\n", hostname);
-        exit(EXIT_FAILURE);
-    }
     printf("[httpproxy] Querying host %s\n", hostname);
     
     // Read the HTTP response from the server
-    bzero(response, MAX_CONTENT_SIZE);
     if (read(sockfd, response, MAX_CONTENT_SIZE) < 0)
-    {
         fprintf(stderr, "[httpproxy] Failed to read from %s\n");
-        exit(EXIT_FAILURE);
-    }
     printf("[httpproxy] Received response from host %s\n", hostname);
 
     close(sockfd);
-
-    return response;
 }
+
+// Function  : putIntoCache
+// Arguments : Cache * of cache, char * of key, and char * of response
+// Does      : 1) Hashes the key
+//             2) Puts the key-response pair in an appropriate place in cache
+// Returns   : nothing
+void
+putIntoCache(Cache *cache, char *key, char *response)
+{
+
+}
+
+// Function  : getFromCache
+// Arguments : Cache * of cache, char * of key, and char * of response
+// Does      : 1) Searches the cache for the key
+//             2) returns/fills in the response with the corresponding response
+// Returns   : nothing
+void
+getFromCache(Cache *cache, char *key, char *response)
+{
+
+}
+
+// Function  : printCache
+// Arguments : Cache * of cache, char * of key, and char * of response
+// Does      : 1) Searches the cache for the key
+//             2) returns/fills in the response with the corresponding response
+// Returns   : nothing
