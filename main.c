@@ -38,6 +38,8 @@ void handleRequest(char *request, char *response, Cache *cache);
 void queryServer(char *host, char *request, char *response);
 void putIntoCache(Cache *cache, char *key, char *response);
 void getFromCache(Cache *cache, char *key, char *response);
+void organizeCache(Cache *cache);
+void removeCacheBlock(Cache *cache, CacheBlock* block);
 void printCache(Cache *cache);
 unsigned hashKey(char *key);
 
@@ -46,8 +48,9 @@ unsigned hashKey(char *key);
 #define CACHE_SIZE 10
 #define HASH_SIZE 13
 #define BACKLOG_SIZE 10
-#define MAX_SERVING 5
 #define CONNECTION_FAIL "Failed to connect to the host\n"
+#define DEFAULT_PORT 80
+#define DEFAULT_MAXAGE 3600
 
 int
 main(int argc, char **argv)
@@ -84,7 +87,7 @@ main(int argc, char **argv)
     cache = createCache();
 
     // Serve client
-    for (int i = 0; i < MAX_SERVING; i++) serveClient(sockfd, cache);
+    while (1) serveClient(sockfd, cache);
 
     // Close socket
     close(sockfd);
@@ -236,6 +239,8 @@ serveClient(int sockfd, Cache *cache)
     }
     printf("[httpproxy] Wrote response to the connection\n");
 
+    printCache(cache);
+
     // Close client socket
     close(client_sockfd);
     printf("[httpproxy] Closed connection\n");
@@ -288,8 +293,8 @@ handleRequest(char *request, char *response, Cache *cache)
         queryServer(host, request, response);
         putIntoCache(cache, key, response);
     }
-
-    printCache(cache);
+    else
+        printf("[httpproxy] Found key in cache\n");
 
     free(str); // for malloc() within strdup()
 }
@@ -316,7 +321,7 @@ queryServer(char *host, char *request, char *response)
     if (addendum)
         portNum = strtol(addendum, &rest, 10);
     else 
-        portNum = 80;
+        portNum = DEFAULT_PORT;
 
     // Create TCP socket
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -378,12 +383,17 @@ putIntoCache(Cache *cache, char *key, char *response)
     char *line_saveptr, *cache_saveptr, *rest;
     char *str, *line, *token;
     unsigned hash;
-    long maxAge;
+    long maxAge = DEFAULT_MAXAGE;
     char line_delim[3] = "\r\n";
     char cache_delim[9] = "max-age=";
 
     hash = hashKey(key);
     printf("[httpproxy] Caching key %s into cache\n", key);
+
+    if (cache->numBlocks == CACHE_SIZE)
+    {
+        removeCacheBlock(cache, cache->lru);
+    }
 
     // Find max age
     str = strdup(response); // strtok_r manipulates the string
@@ -394,17 +404,15 @@ putIntoCache(Cache *cache, char *key, char *response)
         {
             strtok_r(line, cache_delim, &cache_saveptr);
             token = strtok_r(NULL, cache_delim, &cache_saveptr);
-
-            if (token)
-                maxAge = strtol(token, &rest, 10);
-            else
-                maxAge = 3600;
+            if (token) maxAge = strtol(token, &rest, 10);
         }
     }
 
     newBlock = malloc(sizeof(CacheBlock));
     newBlock->key = strdup(key);
     newBlock->value = strdup(response);
+    newBlock->production = time(NULL);
+    newBlock->expiration = newBlock->production + (time_t)maxAge;
     
     // Recent usage linked list operations
     newBlock->moreRU = NULL; // New block is always the MRU
@@ -447,6 +455,8 @@ getFromCache(Cache *cache, char *key, char *response)
     hash = hashKey(key);
     bzero(response, sizeof(response));
 
+    organizeCache(cache);
+
     curr = cache->hashMap[hash];
     while (curr)
     {
@@ -462,20 +472,56 @@ getFromCache(Cache *cache, char *key, char *response)
 
 // Function  : organizeCache
 // Arguments : Cache * of cache
+// Does      : 1) removes stale cache block
+// Returns   : nothing
+void
+organizeCache(Cache *cache)
+{
+    CacheBlock *curr, *next;
+
+    printf("[httpproxy] Removing stale cache blocks\n");
+
+    curr = cache->mru;
+    while (curr)
+    {
+        next = curr->lessRU;
+
+        if (curr->expiration < time(NULL)) // if stale
+        {
+            removeCacheBlock(cache, curr);
+        }
+
+        curr = next;
+    }
+}
+
+// Function  : removeCacheBlock
+// Arguments : Cache * of cache, CacheBlock * of block that needs to be deleted
 // Does      : 1) This function is called when space needs to be cleared up
 //             2) removes any stale cache block
 //             3) if it's still full, remove the LRU block
 // Returns   : nothing
 void
-organizeCache(Cache *cache)
+removeCacheBlock(Cache *cache, CacheBlock *block)
 {
-    CacheBlock *curr;
+    unsigned hash;
 
-    curr = cache->mru;
-    while (curr)
-    {
-        
-    }
+    // Recent usage linked list operation: remove
+    if (block == cache->mru) cache->mru = block->lessRU;
+    if (block == cache->lru) cache->lru = block->moreRU;
+    if (block->moreRU) block->moreRU->lessRU = block->lessRU;
+    if (block->lessRU) block->lessRU->moreRU = block->moreRU;
+
+    // Hash map chaining operation: remove
+    hash = hashKey(block->key);
+    if (block == cache->hashMap[hash]) cache->hashMap[hash] = block->hmNext;
+    if (block->hmPrev) block->hmPrev->hmNext = block->hmNext;
+    if (block->hmNext) block->hmNext->hmPrev = block->hmPrev;
+
+    free(block->key);
+    free(block->value);
+    free(block);
+    cache->numBlocks--;
 }
 
 // Function  : printCache
@@ -494,8 +540,10 @@ printCache(Cache *cache)
     {
         prev = curr;
         curr = curr->lessRU;
-        printf("[httpproxy] [cache] Recency: %d / KEY: %s / AGE: %d\n", counter,
-               prev->key, 0);
+        printf("[httpproxy] Cache Block %d\n", counter);
+        printf("[httpproxy]         Key: %s\n", prev->key);
+        printf("[httpproxy]         Production: %d\n", prev->production);
+        printf("[httpproxy]         Expiration: %d\n", prev->expiration);
         counter++;
     }
 }
