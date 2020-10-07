@@ -1,6 +1,5 @@
 // Date   : September 16, 2020
 // Author : Eric Park
-// Status : This work is not complete. Memory management is very bad.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,8 +16,9 @@ typedef struct CacheBlock
 {
     char *key;
     char *value;
+    time_t production;
     time_t expiration;
-    struct CacheBlock *ruPrev, *ruNext; // For recent usage doubly linked list
+    struct CacheBlock *moreRU, *lessRU; // For recent usage doubly linked list
     struct CacheBlock *hmPrev, *hmNext; // For hashmap chaining
 } CacheBlock;
 
@@ -26,19 +26,20 @@ typedef struct Cache
 {
     CacheBlock *mru;
     CacheBlock *lru;
-    CacheBlock **hashMap;
+    CacheBlock **hashMap; // each hashMap[index] points to the head of chaining
     unsigned numBlocks;
 } Cache;
 
 unsigned getPortNumber(int argc, char **argv);
 Cache *createCache();
 void deleteCache(Cache *cache);
-void serveClient(int sockfd);
-void handleRequest(char *request, char *response);
+void serveClient(int sockfd, Cache *cache);
+void handleRequest(char *request, char *response, Cache *cache);
 void queryServer(char *host, char *request, char *response);
 void putIntoCache(Cache *cache, char *key, char *response);
 void getFromCache(Cache *cache, char *key, char *response);
 void printCache(Cache *cache);
+unsigned hashKey(char *key);
 
 #define MAX_URL_LENGTH 100
 #define MAX_CONTENT_SIZE 1000000 // 10MB
@@ -46,6 +47,7 @@ void printCache(Cache *cache);
 #define HASH_SIZE 13
 #define BACKLOG_SIZE 10
 #define MAX_SERVING 5
+#define CONNECTION_FAIL "Failed to connect to the host\n"
 
 int
 main(int argc, char **argv)
@@ -82,7 +84,7 @@ main(int argc, char **argv)
     cache = createCache();
 
     // Serve client
-    for (int i = 0; i < MAX_SERVING; i++) serveClient(sockfd);
+    for (int i = 0; i < MAX_SERVING; i++) serveClient(sockfd, cache);
 
     // Close socket
     close(sockfd);
@@ -132,23 +134,18 @@ Cache *
 createCache()
 {
     Cache *cache;
+    int i;
 
     cache = (Cache *)malloc(sizeof(Cache));
-    cache->lru = (CacheBlock *)malloc(sizeof(CacheBlock));
-    cache->mru = (CacheBlock *)malloc(sizeof(CacheBlock));
+    cache->lru = NULL;
+    cache->mru = NULL;
     cache->hashMap = (CacheBlock **)malloc(HASH_SIZE * sizeof(CacheBlock *));
     cache->numBlocks = 0;
 
+    for (i = 0; i < HASH_SIZE; i++) cache->hashMap[i] = NULL;
+
     return cache;
 }
-
-// Function  : putIntoCache
-// Arguments : Cache * of cache, char * of key, and char * of value
-// Does      : 1) Cach
-//             2) returns the pointer to the cache
-// Returns   : Cache * of cache
-//void
-//putIntoCache(Cache *cache, )
 
 // Function  : deleteCache
 // Arguments : Cache * of cache
@@ -157,14 +154,24 @@ createCache()
 void
 deleteCache(Cache *cache)
 {
+    CacheBlock *curr, *prev;
+
+    curr = cache->mru;
+    while (curr)
+    {
+        prev = curr;
+        curr = curr->lessRU;
+        free(prev->key);
+        free(prev->value);
+        free(prev);
+    }
+    
     free(cache->hashMap);
-    free(cache->lru);
-    free(cache->mru);
     free(cache);
 }
 
 // Function  : serveClient
-// Arguments : int of socket file descriptor
+// Arguments : int of socket file descriptor, and Cache * of cache
 // Does      : 1) listens on the socket
 //             2) accepts the first connection request
 //             3) reads an HTTP request
@@ -173,7 +180,7 @@ deleteCache(Cache *cache)
 //             5) writes back the HTTP request
 // Returns   : nothing
 void
-serveClient(int sockfd)
+serveClient(int sockfd, Cache *cache)
 {
     int client_sockfd;
     char *request;
@@ -215,14 +222,11 @@ serveClient(int sockfd)
         exit(EXIT_FAILURE);
     }
     request[request_size] = 0; // null-termination for strtok_r
-    //for (int i = 0; i < strlen(request); i++)
-    //    printf("%c : %d\n", request[i], request[i]);
     printf("[httpproxy] Read from the connection\n");
 
     // Handle request
     bzero(response, MAX_CONTENT_SIZE);
-    handleRequest(request, response);
-    printf("response: %s\n", response);
+    handleRequest(request, response, cache);
 
     // Write response to the connection
     if (write(client_sockfd, response, MAX_CONTENT_SIZE) < 0)
@@ -243,12 +247,12 @@ serveClient(int sockfd)
 }
 
 // Function  : handleRequest
-// Arguments : char * of request and char * of response
+// Arguments : char * of request, char * of response, and Cache * of cache
 // Does      : 1) parses the request
 //             2) handles the request appropriately and fills up response
 // Returns   : nothing
 void
-handleRequest(char *request, char *response)
+handleRequest(char *request, char *response, Cache *cache)
 {
     char *line, *key, *host;
     char *str;
@@ -275,8 +279,17 @@ handleRequest(char *request, char *response)
         }
     }
 
-    // Query server
-    queryServer(host, request, response);
+    // Query cache
+    getFromCache(cache, key, response);
+
+    if (response[0] == 0) // If the key-value pair was not in the cache,
+    {
+        // Directly query server
+        queryServer(host, request, response);
+        putIntoCache(cache, key, response);
+    }
+
+    printCache(cache);
 
     free(str); // for malloc() within strdup()
 }
@@ -336,7 +349,7 @@ queryServer(char *host, char *request, char *response)
     {
         fprintf(stderr, "[httpproxy] Failed to connect to %s on port %ld\n",
                 hostname, portNum);
-        strcpy(response, "Failed to connect to the host\n");
+        strcpy(response, CONNECTION_FAIL);
         return;
     }
 
@@ -361,18 +374,108 @@ queryServer(char *host, char *request, char *response)
 void
 putIntoCache(Cache *cache, char *key, char *response)
 {
+    CacheBlock *newBlock, *currBlock;
+    char *line_saveptr, *cache_saveptr, *rest;
+    char *str, *line, *token;
+    unsigned hash;
+    long maxAge;
+    char line_delim[3] = "\r\n";
+    char cache_delim[9] = "max-age=";
 
+    hash = hashKey(key);
+    printf("[httpproxy] Caching key %s into cache\n", key);
+
+    // Find max age
+    str = strdup(response); // strtok_r manipulates the string
+    for (line = strtok_r(str, line_delim, &line_saveptr); line;
+         line = strtok_r(NULL, line_delim, &line_saveptr))
+    {
+        if (strstr(line, "Cache-Control: ") == line)
+        {
+            strtok_r(line, cache_delim, &cache_saveptr);
+            token = strtok_r(NULL, cache_delim, &cache_saveptr);
+
+            if (token)
+                maxAge = strtol(token, &rest, 10);
+            else
+                maxAge = 3600;
+        }
+    }
+
+    newBlock = malloc(sizeof(CacheBlock));
+    newBlock->key = strdup(key);
+    newBlock->value = strdup(response);
+    
+    // Recent usage linked list operations
+    newBlock->moreRU = NULL; // New block is always the MRU
+    newBlock->lessRU = cache->mru;
+    if (!cache->lru) cache->lru = newBlock;
+    if (cache->mru) cache->mru->moreRU = newBlock;
+    cache->mru = newBlock;
+
+    // Hash map operations
+    currBlock = cache->hashMap[hash];
+    if (currBlock) // If there's something already in hash at position hash
+    {
+        while (currBlock->hmNext) currBlock = currBlock->hmNext;
+        currBlock->hmNext = newBlock;
+        newBlock->hmPrev = newBlock;
+    }
+    else // If there's nothing at hashed key yet
+    {
+        cache->hashMap[hash] = newBlock;
+        newBlock->hmPrev = NULL;
+    }
+    newBlock->hmNext = NULL; // New block always at the end of a hash chaining
+
+    cache->numBlocks++;
+
+    free(str);
 }
 
 // Function  : getFromCache
 // Arguments : Cache * of cache, char * of key, and char * of response
 // Does      : 1) Searches the cache for the key
 //             2) returns/fills in the response with the corresponding response
-// Returns   : nothing
+// Returns   : response is a null string if the result is not found
 void
 getFromCache(Cache *cache, char *key, char *response)
 {
+    CacheBlock *curr;
+    unsigned hash;
 
+    hash = hashKey(key);
+    bzero(response, sizeof(response));
+
+    curr = cache->hashMap[hash];
+    while (curr)
+    {
+        if (strcmp(key, curr->key) == 0)
+        {
+            strcpy(response, curr->value);
+            return;
+        }
+
+        curr = curr->hmNext;
+    }
+}
+
+// Function  : organizeCache
+// Arguments : Cache * of cache
+// Does      : 1) This function is called when space needs to be cleared up
+//             2) removes any stale cache block
+//             3) if it's still full, remove the LRU block
+// Returns   : nothing
+void
+organizeCache(Cache *cache)
+{
+    CacheBlock *curr;
+
+    curr = cache->mru;
+    while (curr)
+    {
+        
+    }
 }
 
 // Function  : printCache
@@ -380,3 +483,35 @@ getFromCache(Cache *cache, char *key, char *response)
 // Does      : 1) Searches the cache for the key
 //             2) returns/fills in the response with the corresponding response
 // Returns   : nothing
+void
+printCache(Cache *cache)
+{
+    CacheBlock *curr, *prev;
+    unsigned counter = 0;
+
+    curr = cache->mru;
+    while (curr)
+    {
+        prev = curr;
+        curr = curr->lessRU;
+        printf("[httpproxy] [cache] Recency: %d / KEY: %s / AGE: %d\n", counter,
+               prev->key, 0);
+        counter++;
+    }
+}
+
+// Function  : hashKey
+// Arguments : char * of a string key
+// Does      : 1) hashes the string key into an integer index
+// Returns   : unsigned of hashed value
+// Reference : The C Programming Language (Kernighan & Ritchie), Section 6.6
+unsigned
+hashKey(char *key)
+{
+    unsigned hashval;
+
+    for (hashval = 0; *key != '\0'; key++)
+        hashval = *key + 31 * hashval;
+
+    return hashval % HASH_SIZE;
+}
