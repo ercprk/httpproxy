@@ -16,8 +16,8 @@
 
 # Preliminary
 CC = gcc
-CLIBS = nsl
-CFLAGS = -g -l $(CLIBS)
+CLIBFLAGS = -lnsl
+CFLAGS = -g $(CLIBFLAGS)
 
 all: httpproxy
 
