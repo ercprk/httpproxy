@@ -1,10 +1,17 @@
 # HTTP Proxy
 
+## Todo
+
+Some JPEG files, which I suspect has a null character, is not sent in whole. It
+probably has to do with how strtok_r stops right before a null character.
+
 ## Specifications
 
 1. Only supports IPv4.
 
 2. Only handles GET requests.
+
+3. Puts in "Age" field to the HTTP response header.
 
 ## Requirements
 

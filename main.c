@@ -44,13 +44,14 @@ void printCache(Cache *cache);
 unsigned hashKey(char *key);
 
 #define MAX_URL_LENGTH 100
-#define MAX_CONTENT_SIZE 1000000 // 10MB
+#define MAX_CONTENT_SIZE 10000000 // 10MB
 #define CACHE_SIZE 10
 #define HASH_SIZE 13
 #define BACKLOG_SIZE 10
 #define CONNECTION_FAIL "Failed to connect to the host\n"
 #define DEFAULT_PORT 80
-#define DEFAULT_MAXAGE 3600
+#define MAX_SERVING_SIZE 1000000
+#define DEFAULT_MAXAGE 10
 
 int
 main(int argc, char **argv)
@@ -87,7 +88,7 @@ main(int argc, char **argv)
     cache = createCache();
 
     // Serve client
-    while (1) serveClient(sockfd, cache);
+    for (int i = 0; i < MAX_SERVING_SIZE; i++) serveClient(sockfd, cache);
 
     // Close socket
     close(sockfd);
@@ -392,7 +393,9 @@ putIntoCache(Cache *cache, char *key, char *response)
 
     if (cache->numBlocks == CACHE_SIZE)
     {
-        removeCacheBlock(cache, cache->lru);
+        organizeCache(cache);
+        if (cache->numBlocks == CACHE_SIZE)
+            removeCacheBlock(cache, cache->lru);
     }
 
     // Find max age
@@ -429,7 +432,7 @@ putIntoCache(Cache *cache, char *key, char *response)
         currBlock->hmNext = newBlock;
         newBlock->hmPrev = newBlock;
     }
-    else // If there's nothing at hashed key yet
+    else // If there's nothing at hashed yet
     {
         cache->hashMap[hash] = newBlock;
         newBlock->hmPrev = NULL;
@@ -443,7 +446,8 @@ putIntoCache(Cache *cache, char *key, char *response)
 
 // Function  : getFromCache
 // Arguments : Cache * of cache, char * of key, and char * of response
-// Does      : 1) Searches the cache for the key
+// Does      : 1) Searches HTTP response in cache for the given key
+//             2) If found, inserts "Age" field to the HTTP header
 //             2) returns/fills in the response with the corresponding response
 // Returns   : response is a null string if the result is not found
 void
@@ -451,6 +455,12 @@ getFromCache(Cache *cache, char *key, char *response)
 {
     CacheBlock *curr;
     unsigned hash;
+    time_t age;
+    char ageStr[256];
+    char *save_ptr;
+    char *str, *token;
+    char line_delim[3] = "\r\n"; // Delimiter in between HTTP header and body
+    char null_delim[2] = "\0";
 
     hash = hashKey(key);
     bzero(response, sizeof(response));
@@ -462,7 +472,21 @@ getFromCache(Cache *cache, char *key, char *response)
     {
         if (strcmp(key, curr->key) == 0)
         {
-            strcpy(response, curr->value);
+            // Add age field
+            age = time(NULL) - curr->production;
+            sprintf(ageStr, "%ld", age);
+
+            str = strdup(curr->value);
+            token = strtok_r(str, line_delim, &save_ptr);
+            strcat(response, token);
+            strcat(response, line_delim);
+            strcat(response, "Age: ");
+            strcat(response, ageStr);
+            token = strtok_r(NULL, null_delim, &save_ptr);
+            strcat(response, token);
+            strcat(response, null_delim);
+
+            free(str);
             return;
         }
 
