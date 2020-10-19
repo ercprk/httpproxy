@@ -1,9 +1,17 @@
 # HTTP Proxy
 
-## Todo
+## Usage
 
-Some JPEG files, which I suspect has a null character, is not sent in whole. It
-probably has to do with how strtok_r stops right before a null character.
+For running proxy server:
+```
+make httpproxy
+./httpproxy <portnum>
+```
+
+For using proxy server:
+```
+curl -x <hostname:portnum> <URL>
+```
 
 ## Specifications
 

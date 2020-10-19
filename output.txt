@@ -1,6 +1,0 @@
-[httpproxy] Listening...
-[httpproxy] Accepted connection request
-[httpproxy] Read from the connection
-[httpproxy] Handling request
-hostname: www.cs.tufts.edu
-portNum: 80

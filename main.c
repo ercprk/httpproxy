@@ -16,6 +16,7 @@ typedef struct CacheBlock
 {
     char *key;
     char *value;
+    ssize_t size;
     time_t production;
     time_t expiration;
     struct CacheBlock *moreRU, *lessRU; // For recent usage doubly linked list
@@ -34,24 +35,26 @@ unsigned getPortNumber(int argc, char **argv);
 Cache *createCache();
 void deleteCache(Cache *cache);
 void serveClient(int sockfd, Cache *cache);
-void handleRequest(char *request, char *response, Cache *cache);
-void queryServer(char *host, char *request, char *response);
-void putIntoCache(Cache *cache, char *key, char *response);
-void getFromCache(Cache *cache, char *key, char *response);
+ssize_t handleRequest(char *request, char *response, Cache *cache);
+ssize_t queryServer(char *host, char *request, char *response);
+void putIntoCache(Cache *cache, char *key, char *response,
+                  ssize_t response_size);
+ssize_t getFromCache(Cache *cache, char *key, char *response);
 void organizeCache(Cache *cache);
 void removeCacheBlock(Cache *cache, CacheBlock* block);
 void printCache(Cache *cache);
 unsigned hashKey(char *key);
+ssize_t addAgeField(char *reponse, ssize_t response_size, time_t age);
 
 #define MAX_URL_LENGTH 100
 #define MAX_CONTENT_SIZE 10000000 // 10MB
-#define CACHE_SIZE 10
-#define HASH_SIZE 13
+#define CACHE_SIZE 3
+#define HASH_SIZE 2
 #define BACKLOG_SIZE 10
 #define CONNECTION_FAIL "Failed to connect to the host\n"
 #define DEFAULT_PORT 80
-#define MAX_SERVING_SIZE 1000000
-#define DEFAULT_MAXAGE 10
+#define MAX_SERVING_SIZE 7
+#define DEFAULT_MAXAGE 20
 
 int
 main(int argc, char **argv)
@@ -102,7 +105,6 @@ main(int argc, char **argv)
 // Function  : getPortNumber
 // Arguments : int of argc and char ** of argv 
 // Does      : 1) checks for the singular argument, port number
-//             2) checks the validity of the port number
 //             3) returns the port number
 // Returns   : unsigned int of port number
 unsigned
@@ -118,13 +120,8 @@ getPortNumber(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
-    // Gets port number and checks validity
+    // Gets port number
     portNum = strtol(argv[1], &rest, 10);
-    if (portNum < 1 || portNum > 32767)
-    {
-        fprintf(stderr, "[httpproxy] Port number, %s, is not valid\n", argv[1]);
-        exit(EXIT_FAILURE);
-    }
 
     return (unsigned)portNum;
 }
@@ -190,7 +187,7 @@ serveClient(int sockfd, Cache *cache)
     char *request;
     char *response;
     struct sockaddr *client_addr;
-    ssize_t request_size;
+    ssize_t request_size, response_size, write_size;
     socklen_t *client_addrlen;
 
     client_addr = malloc(sizeof(struct sockaddr));
@@ -230,10 +227,10 @@ serveClient(int sockfd, Cache *cache)
 
     // Handle request
     bzero(response, MAX_CONTENT_SIZE);
-    handleRequest(request, response, cache);
+    response_size = handleRequest(request, response, cache);
 
     // Write response to the connection
-    if (write(client_sockfd, response, MAX_CONTENT_SIZE) < 0)
+    if (write(client_sockfd, response, response_size) < 0)
     {
         fprintf(stderr, "[httpproxy] Failed writing to the connection\n");
         exit(EXIT_FAILURE);
@@ -256,8 +253,8 @@ serveClient(int sockfd, Cache *cache)
 // Arguments : char * of request, char * of response, and Cache * of cache
 // Does      : 1) parses the request
 //             2) handles the request appropriately and fills up response
-// Returns   : nothing
-void
+// Returns   : ssize_t of response size
+ssize_t
 handleRequest(char *request, char *response, Cache *cache)
 {
     char *line, *key, *host;
@@ -265,6 +262,7 @@ handleRequest(char *request, char *response, Cache *cache)
     char *line_saveptr, *get_saveptr, *host_saveptr;
     char line_delim[3] = "\r\n";
     char token_delim[2] = " ";
+    ssize_t response_size;
 
     printf("[httpproxy] Handling HTTP request\n");
 
@@ -286,26 +284,29 @@ handleRequest(char *request, char *response, Cache *cache)
     }
 
     // Query cache
-    getFromCache(cache, key, response);
+    response_size = getFromCache(cache, key, response);
 
     if (response[0] == 0) // If the key-value pair was not in the cache,
     {
         // Directly query server
-        queryServer(host, request, response);
-        putIntoCache(cache, key, response);
+        response_size = queryServer(host, request, response);
+        putIntoCache(cache, key, response, response_size); // Without age field
+        response_size = addAgeField(response, response_size, 0);
     }
     else
         printf("[httpproxy] Found key in cache\n");
 
     free(str); // for malloc() within strdup()
+
+    return response_size;
 }
 
 // Function  : queryServer
 // Arguments : char * of request and char * of <hostname>:<portnumber>
 // Does      : 1) queries the server of the hostname with the request
 //             2) fills up/returns the response from the server
-// Returns   : nothing
-void
+// Returns   : ssize_t of the size of response
+ssize_t
 queryServer(char *host, char *request, char *response)
 {
     int sockfd;
@@ -314,7 +315,11 @@ queryServer(char *host, char *request, char *response)
     char *hostname;
     struct hostent *server;
     struct sockaddr_in server_addr;
+    ssize_t response_size, read_size;
     char delim[2] = ":";
+    char *buf;
+
+    buf = malloc(MAX_CONTENT_SIZE);
 
     // Get hostname and port number
     hostname = strtok_r(host, delim, &saveptr);
@@ -339,7 +344,7 @@ queryServer(char *host, char *request, char *response)
         fprintf(stderr, "[httpproxy] No such host as %s\n", hostname);
         fprintf(stderr, "[httpproxy] h_errno: %d\n", h_errno);
         strcpy(response, "No such host indicated by the hostname\n");
-        return;
+        return 0;
     }
 
     // Build the server's Internet address
@@ -356,7 +361,7 @@ queryServer(char *host, char *request, char *response)
         fprintf(stderr, "[httpproxy] Failed to connect to %s on port %ld\n",
                 hostname, portNum);
         strcpy(response, CONNECTION_FAIL);
-        return;
+        return 0;
     }
 
     // Send the HTTP request to the server
@@ -365,20 +370,30 @@ queryServer(char *host, char *request, char *response)
     printf("[httpproxy] Querying host %s\n", hostname);
     
     // Read the HTTP response from the server
-    if (read(sockfd, response, MAX_CONTENT_SIZE) < 0)
+    response_size = read(sockfd, response, MAX_CONTENT_SIZE);
+    while ((read_size = read(sockfd, buf, MAX_CONTENT_SIZE)) > 0)
+    {
+        memcpy(response + response_size, buf, read_size);
+        response_size += read_size;
+    }
+    if (response_size < 0)
         fprintf(stderr, "[httpproxy] Failed to read from %s\n");
     printf("[httpproxy] Received response from host %s\n", hostname);
 
     close(sockfd);
+    free(buf);
+
+    return response_size;
 }
 
 // Function  : putIntoCache
-// Arguments : Cache * of cache, char * of key, and char * of response
+// Arguments : Cache * of cache, char * of key, char * of response, and ssize_t
+//             of response_size
 // Does      : 1) Hashes the key
 //             2) Puts the key-response pair in an appropriate place in cache
 // Returns   : nothing
 void
-putIntoCache(Cache *cache, char *key, char *response)
+putIntoCache(Cache *cache, char *key, char *response, ssize_t response_size)
 {
     CacheBlock *newBlock, *currBlock;
     char *line_saveptr, *cache_saveptr, *rest;
@@ -394,7 +409,7 @@ putIntoCache(Cache *cache, char *key, char *response)
     if (cache->numBlocks == CACHE_SIZE)
     {
         organizeCache(cache);
-        if (cache->numBlocks == CACHE_SIZE)
+        if (cache->numBlocks == CACHE_SIZE) // If none were stale
             removeCacheBlock(cache, cache->lru);
     }
 
@@ -413,7 +428,9 @@ putIntoCache(Cache *cache, char *key, char *response)
 
     newBlock = malloc(sizeof(CacheBlock));
     newBlock->key = strdup(key);
-    newBlock->value = strdup(response);
+    newBlock->value = malloc(response_size);
+    memcpy(newBlock->value, response, response_size);
+    newBlock->size = response_size;
     newBlock->production = time(NULL);
     newBlock->expiration = newBlock->production + (time_t)maxAge;
     
@@ -449,21 +466,16 @@ putIntoCache(Cache *cache, char *key, char *response)
 // Does      : 1) Searches HTTP response in cache for the given key
 //             2) If found, inserts "Age" field to the HTTP header
 //             2) returns/fills in the response with the corresponding response
-// Returns   : response is a null string if the result is not found
-void
+// Returns   : ssize_t of response size
+ssize_t
 getFromCache(Cache *cache, char *key, char *response)
 {
     CacheBlock *curr;
     unsigned hash;
     time_t age;
-    char ageStr[256];
-    char *save_ptr;
-    char *str, *token;
-    char line_delim[3] = "\r\n"; // Delimiter in between HTTP header and body
-    char null_delim[2] = "\0";
+    ssize_t response_size;
 
     hash = hashKey(key);
-    bzero(response, sizeof(response));
 
     organizeCache(cache);
 
@@ -472,22 +484,14 @@ getFromCache(Cache *cache, char *key, char *response)
     {
         if (strcmp(key, curr->key) == 0)
         {
-            // Add age field
+            response_size = curr->size;
+            memcpy(response, curr->value, response_size);
             age = time(NULL) - curr->production;
-            sprintf(ageStr, "%ld", age);
 
-            str = strdup(curr->value);
-            token = strtok_r(str, line_delim, &save_ptr);
-            strcat(response, token);
-            strcat(response, line_delim);
-            strcat(response, "Age: ");
-            strcat(response, ageStr);
-            token = strtok_r(NULL, null_delim, &save_ptr);
-            strcat(response, token);
-            strcat(response, null_delim);
+            // Add age field
+            response_size = addAgeField(response, response_size, age);
 
-            free(str);
-            return;
+            return response_size;
         }
 
         curr = curr->hmNext;
@@ -566,6 +570,7 @@ printCache(Cache *cache)
         curr = curr->lessRU;
         printf("[httpproxy] Cache Block %d\n", counter);
         printf("[httpproxy]         Key: %s\n", prev->key);
+        printf("[httpproxy]         Size: %ld\n", prev->size);
         printf("[httpproxy]         Production: %d\n", prev->production);
         printf("[httpproxy]         Expiration: %d\n", prev->expiration);
         counter++;
@@ -586,4 +591,48 @@ hashKey(char *key)
         hashval = *key + 31 * hashval;
 
     return hashval % HASH_SIZE;
+}
+
+// Function  : addAgeField
+// Arguments : char * of response, ssize_t of response_size, and time_t of age
+// Does      : 1) adds the age field to the HTTP response
+// Returns   : ssize_t of new response_size
+ssize_t
+addAgeField(char *response, ssize_t response_size, time_t age)
+{
+    size_t offset;
+    char *originalCopy;
+    char *save_ptr;
+    char *str, *token;
+    char line_delim[3] = "\r\n";
+    char age_header[6] = "Age: ";
+    char ageStr[256];
+
+    offset = 0;
+    originalCopy = malloc(response_size);
+    memcpy(originalCopy, response, response_size);
+    sprintf(ageStr, "%ld", age);
+
+    // Add age field
+    str = strdup(originalCopy);
+    token = strtok_r(str, line_delim, &save_ptr); // First line
+    memcpy(response + offset, token, strlen(token));
+    offset += strlen(token);
+    memcpy(response + offset, line_delim, strlen(line_delim));
+    offset += strlen(line_delim);
+    memcpy(response + offset, age_header, strlen(age_header));
+    offset += strlen(age_header);
+    memcpy(response + offset, ageStr, strlen(ageStr));
+    offset += strlen(ageStr);
+    memcpy(response + offset, line_delim, strlen(line_delim));
+    offset += strlen(line_delim);
+    memcpy(response + offset,
+           originalCopy + strlen(token) + strlen(line_delim),
+           response_size - (strlen(token) + strlen(line_delim)));
+
+    free(str);
+    free(originalCopy);
+
+    return response_size + strlen(age_header) + (2 * strlen(line_delim)) + 
+           strlen(ageStr);
 }
