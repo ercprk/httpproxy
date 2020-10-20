@@ -1,12 +1,8 @@
 # Networks
 
-## Description
-
 Collection of networks softwares
 
 ## httpproxy
-
-### Description
 
 HTTP proxy
 
@@ -24,8 +20,6 @@ curl -x <hostname:portnum> <URL>
 ```
 
 ## chatapp
-
-### Description
 
 chat application
 
