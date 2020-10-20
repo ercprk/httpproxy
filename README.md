@@ -4,17 +4,13 @@
 
 Collection of networks softwares
 
-## List
+## httpproxy
 
-
-
-### httpproxy
-
-#### Description
+### Description
 
 HTTP proxy
 
-#### Usage
+### Usage
 
 For running proxy server:
 ```
@@ -27,13 +23,13 @@ For using proxy server:
 curl -x <hostname:portnum> <URL>
 ```
 
-### chatapp
+## chatapp
 
-#### Description
+### Description
 
 chat application
 
-#### Usage
+### Usage
 
 ```
 hello()
