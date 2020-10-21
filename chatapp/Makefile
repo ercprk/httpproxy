@@ -1,10 +1,10 @@
-# Makefile for a HTTP Proxy Server
+# Makefile for Chat Application
 #
 #    Copyright 2020 - Eric Park
 #
 # Useful sample program targets:
 #
-#    httpproxy - a basic HTTP proxy server
+#    chatserver  - chat application
 #
 #  Maintenance targets:
 #
@@ -19,16 +19,16 @@ CC = gcc
 CLIBFLAGS = -lnsl
 CFLAGS = -g $(CLIBFLAGS)
 
-all: httpproxy
+all: chatserver
 
 #
-# Build the httpproxy
+# Build the chat app
 #
-httpproxy: main.c
-	$(CC) $(CFLAGS) -o httpproxy main.c
+chatserver: chatserver.c
+	$(CC) $(CFLAGS) -o chatserver chatserver.c
 
 #
 # Delete all compiled code in preparation
 # for forcing complete rebuild#
 clean:
-	rm -f httpproxy
+	rm -f chatserver

@@ -23,7 +23,7 @@ typedef struct CacheBlock
     struct CacheBlock *hmPrev, *hmNext; // For hashmap chaining
 } CacheBlock;
 
-typedef struct Cache
+typedef struct
 {
     CacheBlock *mru;
     CacheBlock *lru;
@@ -48,13 +48,13 @@ ssize_t addAgeField(char *reponse, ssize_t response_size, time_t age);
 
 #define MAX_URL_LENGTH 100
 #define MAX_CONTENT_SIZE 10000000 // 10MB
-#define CACHE_SIZE 3
-#define HASH_SIZE 2
+#define CACHE_SIZE 10
+#define HASH_SIZE 13
 #define BACKLOG_SIZE 10
 #define CONNECTION_FAIL "Failed to connect to the host\n"
 #define DEFAULT_PORT 80
-#define MAX_SERVING_SIZE 7
-#define DEFAULT_MAXAGE 20
+#define MAX_SERVING_SIZE 1000000
+#define DEFAULT_MAXAGE 3600
 
 int
 main(int argc, char **argv)
@@ -198,7 +198,7 @@ serveClient(int sockfd, Cache *cache)
     // Listen
     if (listen(sockfd, BACKLOG_SIZE) != 0)
     {
-        fprintf(stderr, "[httpproxy] Failed listening to port\n");
+        fprintf(stderr, "[httpproxy] Failed listening on socket\n");
         fprintf(stderr, "[httpproxy] errno: %d\n", errno);
         exit(EXIT_FAILURE);
     }
@@ -286,15 +286,13 @@ handleRequest(char *request, char *response, Cache *cache)
     // Query cache
     response_size = getFromCache(cache, key, response);
 
-    if (response[0] == 0) // If the key-value pair was not in the cache,
+    if (response_size == 0) // If the key-value pair was not in the cache,
     {
         // Directly query server
         response_size = queryServer(host, request, response);
         putIntoCache(cache, key, response, response_size); // Without age field
         response_size = addAgeField(response, response_size, 0);
     }
-    else
-        printf("[httpproxy] Found key in cache\n");
 
     free(str); // for malloc() within strdup()
 
@@ -426,8 +424,9 @@ putIntoCache(Cache *cache, char *key, char *response, ssize_t response_size)
         }
     }
 
-    newBlock = malloc(sizeof(CacheBlock));
-    newBlock->key = strdup(key);
+    newBlock = malloc(sizeof(*newBlock));
+    newBlock->key = malloc(strlen(key) + 1);
+    memcpy(newBlock->key, key, strlen(key) + 1);
     newBlock->value = malloc(response_size);
     memcpy(newBlock->value, response, response_size);
     newBlock->size = response_size;
@@ -447,7 +446,7 @@ putIntoCache(Cache *cache, char *key, char *response, ssize_t response_size)
     {
         while (currBlock->hmNext) currBlock = currBlock->hmNext;
         currBlock->hmNext = newBlock;
-        newBlock->hmPrev = newBlock;
+        newBlock->hmPrev = currBlock;
     }
     else // If there's nothing at hashed yet
     {
@@ -491,11 +490,27 @@ getFromCache(Cache *cache, char *key, char *response)
             // Add age field
             response_size = addAgeField(response, response_size, age);
 
+            printf("[httpproxy] Retrieving cache with key %s\n", key);
+
+            // Update recent usage linked list
+            if (curr != cache->mru)
+            {
+                if (curr == cache->lru)cache->lru = curr->moreRU;
+                if (curr->moreRU) curr->moreRU->lessRU = curr->lessRU;
+                if (curr->lessRU) curr->lessRU->moreRU = curr->moreRU;
+                curr->moreRU = NULL;
+                curr->lessRU = cache->mru;
+                cache->mru->moreRU = curr;
+                cache->mru = curr;
+            }
+
             return response_size;
         }
 
         curr = curr->hmNext;
     }
+
+    return 0;
 }
 
 // Function  : organizeCache
@@ -507,7 +522,7 @@ organizeCache(Cache *cache)
 {
     CacheBlock *curr, *next;
 
-    printf("[httpproxy] Removing stale cache blocks\n");
+    printf("[httpproxy] Organizing cache...\n");
 
     curr = cache->mru;
     while (curr)
@@ -534,6 +549,8 @@ removeCacheBlock(Cache *cache, CacheBlock *block)
 {
     unsigned hash;
 
+    printf("[httpproxy] Removing stale cache with key %s\n", block->key);
+
     // Recent usage linked list operation: remove
     if (block == cache->mru) cache->mru = block->lessRU;
     if (block == cache->lru) cache->lru = block->moreRU;
@@ -550,6 +567,8 @@ removeCacheBlock(Cache *cache, CacheBlock *block)
     free(block->value);
     free(block);
     cache->numBlocks--;
+
+    printf("[httpproxy] Done removing cache block\n");
 }
 
 // Function  : printCache
@@ -574,6 +593,12 @@ printCache(Cache *cache)
         printf("[httpproxy]         Production: %d\n", prev->production);
         printf("[httpproxy]         Expiration: %d\n", prev->expiration);
         counter++;
+
+        if (counter > CACHE_SIZE)
+        {
+            printf("[httpproxy] Cache size violated!\n");
+            break;
+        }
     }
 }
 
@@ -608,13 +633,16 @@ addAgeField(char *response, ssize_t response_size, time_t age)
     char age_header[6] = "Age: ";
     char ageStr[256];
 
+    printf("[httpproxy] Adding age field\n");
+
     offset = 0;
     originalCopy = malloc(response_size);
+    str = malloc(response_size);
     memcpy(originalCopy, response, response_size);
+    memcpy(str, response, response_size);
     sprintf(ageStr, "%ld", age);
 
     // Add age field
-    str = strdup(originalCopy);
     token = strtok_r(str, line_delim, &save_ptr); // First line
     memcpy(response + offset, token, strlen(token));
     offset += strlen(token);

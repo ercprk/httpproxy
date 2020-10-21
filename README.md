@@ -14,7 +14,7 @@ make httpproxy
 ./httpproxy <portnum>
 ```
 
-For using proxy server:
+For using proxy server, use hostname that the proxy server is running on:
 ```
 curl -x <hostname:portnum> <URL>
 ```

@@ -8,7 +8,7 @@ make httpproxy
 ./httpproxy <portnum>
 ```
 
-For using proxy server:
+For using proxy server, use hostname that the proxy server is running on:
 ```
 curl -x <hostname:portnum> <URL>
 ```
@@ -20,6 +20,9 @@ curl -x <hostname:portnum> <URL>
 2. Only handles GET requests.
 
 3. Puts in "Age" field to the HTTP response header.
+
+4. If the port number for the server is included in the HTTP request it is 
+respected, otherwise port 80 is assumed.
 
 ## Requirements
 
@@ -39,8 +42,7 @@ Host: www.example.com
 to the domain in the ​`Host` field, making it a good resource for making a
 connection to the server.
 
-3. If the port number for the server is included in the HTTP request it
-should be respected, otherwise port 80 can be assumed.
+3. 
 
 4. There is no need to worry about any query parameters at the end of URLs. 
 Assume that any data the server needs to serve a `GET` request will be included 
