@@ -375,7 +375,7 @@ queryServer(char *host, char *request, char *response)
         response_size += read_size;
     }
     if (response_size < 0)
-        fprintf(stderr, "[httpproxy] Failed to read from %s\n");
+        fprintf(stderr, "[httpproxy] Failed to read from %s\n", hostname);
     printf("[httpproxy] Received response from host %s\n", hostname);
 
     close(sockfd);
