@@ -2,21 +2,16 @@
 
 ## Usage
 
-For running proxy server:
+For running chat server:
 ```
-make httpproxy
-./httpproxy <portnum>
-```
-
-For using proxy server:
-```
-curl -x <hostname:portnum> <URL>
+make chatserver
+./chatserver <portnum>
 ```
 
 ## Specifications
 
-1. O
+TBD
 
-2. O
+## TODO
 
-3. P
+chatclient

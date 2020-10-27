@@ -4,10 +4,6 @@ Collection of networks softwares
 
 ## httpproxy
 
-HTTP proxy
-
-### Usage
-
 For running proxy server:
 ```
 make httpproxy
@@ -17,14 +13,21 @@ make httpproxy
 For using proxy server, use hostname that the proxy server is running on:
 ```
 curl -x <hostname:portnum> <URL>
+
 ```
 
 ## chatapp
 
-chat application
+#### Description
 
-### Usage
+A chat application based on client-server model.
+
+#### Usage
 
 ```
-hello()
+make chatserver
+./chatserver <portnum>
 ```
+
+#### Note
+

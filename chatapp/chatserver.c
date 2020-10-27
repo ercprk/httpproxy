@@ -50,7 +50,7 @@ enum MessageType
 unsigned getPortNumber(int argc, char **argv);
 void serveClients(int sockfd);
 void handleConnectionRequest(int sockfd, fd_set *active_fd_set);
-void readFromClient(int sockfd, Message **messages);
+int readFromClient(int sockfd, Message **messages);
 void handleMessages(Message **messages, ClientList *clientList, 
                     fd_set *read_fd_set, fd_set *active_fd_set);
 bool isMessagePartial(Message *message);
@@ -67,9 +67,10 @@ void deregisterClient(ClientList *clientList, int sockfd);
 void freeClientList(ClientList *clientList);
 void printClientList(ClientList *clientList);
 int clientNameToSockFd(ClientList *clientList, char *clientName);
+void organizeMessageBuffers(Message **messages, fd_set *read_fd_set);
 
 #define BACKLOG_SIZE 10
-#define SERVING_SIZE 10
+#define SERVING_SIZE 20
 #define TYPE_FIELD_SIZE 2
 #define TYPE_FIELD_START_INDEX 0
 #define SOURCE_FIELD_SIZE 20
@@ -89,6 +90,7 @@ int clientNameToSockFd(ClientList *clientList, char *clientName);
 #define SIG_CLIENT_ALREADY_PRESENT -1
 #define SIG_CLIENT_NOT_PRESENT -2
 #define SERVER_NAME "Server"
+#define PARTIAL_MESSAGE_MAX_AGE 60
 
 int
 main(int argc, char **argv)
@@ -191,6 +193,7 @@ serveClients(int sockfd)
         messages[i] = malloc(sizeof(Message));
         messages[i]->buffer = malloc(MAX_MESSAGE_SIZE);
         messages[i]->size = 0;
+        messages[i]->last_retrieved = time(NULL);
     }
 
     while (serving_round < SERVING_SIZE)
@@ -203,7 +206,7 @@ serveClients(int sockfd)
             exit(EXIT_FAILURE);
         }
 
-        printf("[chatserver] Serving round %d\n", serving_round);
+        printf("[chatserver]\n[chatserver] Serving round %d\n", serving_round);
 
         // Service all the sockets with input pending.
         for (i = 0; i < FD_SETSIZE; ++i)
@@ -213,11 +216,22 @@ serveClients(int sockfd)
                 if (i == sockfd) // Connection request on original socket.
                     handleConnectionRequest(sockfd, active_fd_set);
                 else // Data arriving on an already-connected socket.
-                    readFromClient(i, messages);
+                {
+                    if (readFromClient(i, messages) == SIG_STOP_SERVING)
+                    {
+                        close(i);
+                        FD_CLR(i, active_fd_set);
+                        deregisterClient(clientList, i);
+                        printf("[chatserver] Closed connection with socket ");
+                        printf("%d\n", i);
+                    }
+                }
             }
         }
 
         handleMessages(messages, clientList, read_fd_set, active_fd_set);
+
+        organizeMessageBuffers(messages, read_fd_set);
 
         ++serving_round;
     }
@@ -275,8 +289,8 @@ handleConnectionRequest(int sockfd, fd_set *active_fd_set)
 //             mapping of socket file handles to message buffers
 // Does      : reads from the client socket, and stores the message in the 
 //             message buffers
-// Returns   : nothing
-void
+// Returns   : SIG_STOP_SERVING to signal stop serving, SIG_OK otherwise
+int
 readFromClient(int sockfd, Message **messages)
 {
     void *read_buffer;
@@ -293,9 +307,6 @@ readFromClient(int sockfd, Message **messages)
     while ((read_size = read(sockfd, read_buffer,
                              MAX_MESSAGE_SIZE - messages[sockfd]->size)) > 0)
     {
-        if (read_size < 0)
-            break;
-
         memcpy(messages[sockfd]->buffer + messages[sockfd]->size, read_buffer,
                read_size);
         messages[sockfd]->size += read_size;
@@ -306,6 +317,14 @@ readFromClient(int sockfd, Message **messages)
     }
 
     free(read_buffer);
+
+    if (read_size == 0)
+    {
+        printf("[chatserver] Client at socket %d disconnected\n", sockfd);
+        return SIG_STOP_SERVING;
+    }
+    else
+        return SIG_OK;
 }
 
 // Function  : handleMessages
@@ -499,14 +518,18 @@ dispatchMessage(unsigned short type, char *source, char *destination,
                 if (write(sockfd, reply, HEADER_SIZE) < 0)
                     return_val = SIG_STOP_SERVING;
                 free(reply);
+                printf("[chatserver] Sent CANNOT_DELIVER_ERROR to socket %d\n",
+                       sockfd);
             }
             else
             {
                 reply = makeMessageBuffer(CHAT, source, destination, length,
                                           msg_id, data);
-                if (write(sockfd, reply, HEADER_SIZE + length) < 0)
+                if (write(dest_sockfd, reply, HEADER_SIZE + length) < 0)
                     return_val = SIG_STOP_SERVING;
                 free(reply);
+                printf("[chatserver] Sent CHAT message to socket %d\n",
+                       dest_sockfd);
             }
             break;
         case EXIT:
@@ -688,9 +711,11 @@ deregisterClient(ClientList *clientList, int sockfd)
                 prev->next = curr->next;
                 name = strdup(curr->name);
                 free(curr->name);
-                free(name);
+                free(curr);
                 curr = prev->next;
             }
+
+            --clientList->size;
 
             printf("[chatserver] Deregistered client %s with socket %d\n",
                    name, sockfd);
@@ -702,8 +727,6 @@ deregisterClient(ClientList *clientList, int sockfd)
             curr = curr->next;
         }
     }
-
-    --clientList->size;
 }
 
 // Function  : freeClientList
@@ -769,4 +792,33 @@ clientNameToSockFd(ClientList *clientList, char *clientName)
     }
 
     return SIG_CLIENT_NOT_PRESENT;
+}
+
+// Function  : organizeMessageBuffers
+// Arguments : Message ** of messages, fd_set * of read fd set
+// Does      : Iterates through the messages and gets rid of stale partial
+//             messages
+// Returns   : nothing
+void
+organizeMessageBuffers(Message **messages, fd_set *read_fd_set)
+{
+    int i;
+
+    for (i = 0; i < FD_SETSIZE; ++i)
+    {
+        if (FD_ISSET(i, read_fd_set))
+        {
+            if (isMessagePartial(messages[i]))
+            {
+                if (messages[i]->last_retrieved + PARTIAL_MESSAGE_MAX_AGE <
+                    time(NULL) && messages[i]->size > 0)
+                {
+                    bzero(messages[i]->buffer, messages[i]->size);
+                    messages[i]->size = 0;
+                    printf("[chatserver] Removed stale partial message for ");
+                    printf("socket %d\n", i);
+                }
+            }
+        }
+    }
 }
