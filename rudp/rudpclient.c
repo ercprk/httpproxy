@@ -34,22 +34,31 @@ enum PacketType
 #define FILENAME_IDX 2
 #define DATA_IDX 2
 #define IGNORE 0
+#define DST_DIR "./DST/"
+#define MAX_FILE_SIZE 26112
 
 int
 main(int argc, char **argv)
 {
+    char type;
+    char seqno;
+    int ack;
     int sockfd;
     int portno;
     int windowsize;
     int nbytes;
     int serverlen;
+    size_t filesize;
     struct in_addr hostaddr;
     struct sockaddr_in serveraddr;
     struct hostent *server;
     char *filename;
+    char *filepath;
     char *hostIP;
     void *pkt;
-    void *buf;
+    void *readbuf;
+    void *databuf;
+    FILE *fp;
 
     // Check command line arguments
     if (argc != 5)
@@ -101,19 +110,75 @@ main(int argc, char **argv)
         fprintf(stderr, "[rudpclient] Error in sendto()\n");
         exit(EXIT_FAILURE);
     }
+    free(pkt);
 
-    // Print the server's reply
-    buf = malloc(DATA_PKT_SIZE);
-    nbytes = recvfrom(sockfd, buf, DATA_PKT_SIZE, 0,
-                      (struct sockaddr *)&serveraddr, &serverlen);
-    if (nbytes < 0)
+    // Copies the file over from the server to the data buffer
+    ack = -1;
+    filesize = 0;
+    readbuf = malloc(DATA_PKT_SIZE);
+    databuf = malloc(MAX_FILE_SIZE);
+    do
     {
-        fprintf(stderr, "[rudpclient] Error in recvfrom()\n");
+        // Read in
+        bzero(readbuf, DATA_PKT_SIZE);
+        nbytes = recvfrom(sockfd, readbuf, DATA_PKT_SIZE, 0,
+                          (struct sockaddr *)&serveraddr, &serverlen);
+        if (nbytes < 0)
+        {
+            fprintf(stderr, "[rudpclient] Error in recvfrom()\n");
+            exit(EXIT_FAILURE);
+        }
+
+        // Check type
+        memcpy(&type, readbuf + TYPE_IDX, TYPE_SIZE);
+        if (type == TYPE_ERROR)
+        {
+            printf("[rudpclient] Could not transfer file %s from the server\n",
+                   filename);
+            free(readbuf);
+            free(databuf);
+            close(sockfd);
+            return 0;
+        }
+        else if (type == TYPE_DATA)
+        {
+            memcpy(&seqno, readbuf + SEQNO_IDX, SEQNO_SIZE);
+            if (seqno == ack + 1) // If the packet is the right one
+            {
+                // Store and send ACK
+                ++ack;
+                memcpy(databuf + (seqno * DATA_SIZE), readbuf + DATA_IDX,
+                       nbytes - 2);
+                filesize += nbytes - 2; // - 2 for type and seqno
+                pkt = makePacket(TYPE_ACK, ack, NULL);
+                if (sendto(sockfd, pkt, ACK_PKT_SIZE, 0,
+                           (struct sockaddr *)&serveraddr, serverlen) < 0)
+                {
+                    fprintf(stderr, "[rudpclient] Error in sendto()\n");
+                    exit(EXIT_FAILURE);
+                }
+                printf("[rudpclient] Received and ACK'd packet %d of size %d\n",
+                       ack, nbytes);
+                free(pkt);
+            }
+        }
+    } while (nbytes == DATA_PKT_SIZE);
+    free(readbuf);
+
+    // Write file
+    filepath = malloc(strlen(filename) + strlen(DST_DIR) + 1);
+    strcpy(filepath, DST_DIR);
+    strcat(filepath, filename);
+    fp = fopen(filepath, "w+");
+    if (fwrite(databuf, filesize, 1, fp) != 1)
+    {
+        fprintf(stderr, "[rudpclient] Error on writing file %s\n", filepath);
         exit(EXIT_FAILURE);
     }
-
-    free(pkt);
-    free(buf);
+    printf("[rudpclient] Successfully wrote to file in path %s\n", filepath);
+    fclose(fp);
+    free(databuf);
+    free(filepath);
 
     close(sockfd);
 
@@ -140,9 +205,22 @@ makePacket(char type, char second_field, char *filename)
             memcpy(pkt + WINDOWSIZE_IDX, &second_field, WINDOWSIZE_SIZE);
             memcpy(pkt + FILENAME_IDX, filename, strlen(filename) + 1);
             break;
+        case TYPE_ACK:
+            pkt = malloc(ACK_PKT_SIZE);
+            bzero(pkt, ACK_PKT_SIZE);
+            memcpy(pkt + TYPE_IDX, &type, TYPE_SIZE);
+            memcpy(pkt + SEQNO_IDX, &second_field, SEQNO_SIZE);
+            break;
         default:
             break;
     }
 
     return pkt;
 }
+
+// Function  : handleData
+// Arguments : char of type, char of window size / sequence number, char * of
+//             filename
+// Does      : makes a packet of given type. Memory is allocated as needs to be
+//             freed
+// Returns   : void * of packet

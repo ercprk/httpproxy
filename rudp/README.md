@@ -1,17 +1,19 @@
-# Chat Application
+# Reliable UDP File Transfer
 
 ## Usage
 
-For running chat server:
+For running the server:
 ```
-make chatserver
-./chatserver <portnum>
+make rudpserver
+./rudpserver <portnum>
 ```
 
-## Specifications
+For running the client:
+```
+make rudpclient
+./rudpclient <hostIP> <portno> <windowsize> <filename>
+```
 
-TBD
+## Requirements
 
-## TODO
-
-chatclient
+For the client, the file will be copied to the ./DEST directory.

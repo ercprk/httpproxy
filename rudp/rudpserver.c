@@ -1,6 +1,7 @@
 // Date   : October 30, 2020
 // Author : Eric Park
 
+#include <errno.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,7 +13,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 
-#define LOOP_SIZE 1
+#define LOOP_SIZE 1000
 #define RRQ_PKT_SIZE 22
 #define DATA_PKT_SIZE 514
 #define ACK_PKT_SIZE 2
@@ -28,6 +29,7 @@
 #define FILENAME_IDX 2
 #define DATA_IDX 2
 #define IGNORE 0
+#define TIMEOUT_LIMIT 5
 
 enum PacketType
 {
@@ -35,8 +37,9 @@ enum PacketType
 };
 
 unsigned getPortNumber(int argc, char **argv);
-void *makePacket(char type, char seqno, char *data);
+void *makePacket(char type, char seqno, void *data, size_t datasize);
 unsigned handleRRQ(void *pkt, char *filename);
+unsigned handleACK(void *pkt);
 
 int
 main(int argc, char **argv)
@@ -45,16 +48,27 @@ main(int argc, char **argv)
     int optval;
     int clientlen;
     int ack;
+    int lastpkt;
+    int winstart;
+    int winend;
+    int i;
+    long filesize;
     char *hostaddrp;
     char *filename;
-    void *buf;
+    void *data;
+    void *databuf;
+    void *readbuf;
     void *pkt;
     unsigned portNum;
-    unsigned windowsize;
+    unsigned winsize;
     unsigned loop_counter;
+    unsigned num_timeouts;
+    size_t datasize;
     ssize_t nbytes; // retval from recvfrom()/sendto()
     struct hostent *hostp;
     struct sockaddr_in serveraddr, clientaddr;
+    struct timeval timeout;
+    FILE *fp;
 
     // Handle input and get port number
     portNum = getPortNumber(argc, argv);
@@ -95,9 +109,9 @@ main(int argc, char **argv)
         printf("[rudpserver] Waiting for packets to arrive...\n");
 
         // Receive a UDP datagram from a client
-        buf = malloc(RRQ_PKT_SIZE);
-        bzero(buf, RRQ_PKT_SIZE);
-        nbytes = recvfrom(sockfd, buf, RRQ_PKT_SIZE, 0,
+        readbuf = malloc(RRQ_PKT_SIZE);
+        bzero(readbuf, RRQ_PKT_SIZE);
+        nbytes = recvfrom(sockfd, readbuf, RRQ_PKT_SIZE, 0,
                           (struct sockaddr *)&clientaddr, &clientlen);
         if (nbytes < 0)
         {
@@ -125,30 +139,147 @@ main(int argc, char **argv)
 
         // Handle the RRQ packet
         filename = malloc(FILENAME_SIZE);
-        windowsize = handleRRQ(buf, filename);
+        winsize = handleRRQ(readbuf, filename);
+        free(readbuf);
         printf("[rudpserver]         Type: RRQ\n");
-        printf("[rudpserver]         Window size: %u\n", windowsize);
+        printf("[rudpserver]         Window size: %u\n", winsize);
         printf("[rudpserver]         File: %s\n", filename);
 
-        // Load file into the buffer. If fails, send ERROR packet
-
-
-        // Echo the input back to the client 
-        pkt = makePacket(TYPE_ERROR, IGNORE, NULL);
-        nbytes = sendto(sockfd, pkt, ERROR_PKT_SIZE, 0,
-                        (struct sockaddr *)&clientaddr, clientlen);
-        if (nbytes < 0) 
+        // If the file doesn't exist, send ERROR packet
+        if (access(filename, F_OK) == -1)
         {
-            fprintf(stderr, "[rudpserver] Error on sendto()\n");
+            pkt = makePacket(TYPE_ERROR, IGNORE, NULL, IGNORE);
+            nbytes = sendto(sockfd, pkt, ERROR_PKT_SIZE, 0,
+                            (struct sockaddr *)&clientaddr, clientlen);
+            if (nbytes < 0) 
+            {
+                fprintf(stderr, "[rudpserver] Error on sendto()\n");
+                exit(EXIT_FAILURE);
+            }
+            printf("[rudpclient] Could not locate file %s\n", filename);
+            printf("[rudpclient] Sent ERROR packet to the client\n");
+            free(filename);
+            free(pkt);
+
+            continue;
+        }
+
+        // Calculate filesize
+        fp = fopen(filename, "r");
+        fseek(fp, 0, SEEK_END);
+        filesize = ftell(fp);
+        fseek(fp, 0, SEEK_SET);
+
+        // Load file into the buffer
+        databuf = malloc(filesize);
+        if (fread(databuf, filesize, 1, fp) != 1)
+        {
+            fprintf(stderr, "[rudpserver] Error on fread()\n");
+            exit(EXIT_FAILURE);
+        }
+        printf("[rudpserver] Read %ld bytes of file %s\n", filesize, filename);
+        fclose(fp);
+
+        // Set timeout 
+        timeout.tv_sec = 3;
+        timeout.tv_usec = 0;
+        if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout,
+            sizeof(timeout)) < 0)
+        {
+            fprintf(stderr, "[rudpserver] setsockopt() failed\n");
+            exit(EXIT_FAILURE);
+        }
+
+        // Send file to the client
+        ack = -1;
+        winstart = 0;
+        num_timeouts = 0;
+        lastpkt = filesize / DATA_SIZE;
+        readbuf = malloc(ACK_PKT_SIZE);
+        do
+        {
+            // Configure window end
+            winend = winstart + winsize - 1;
+            winend = winend > lastpkt ? lastpkt : winend;
+
+            // Send packets within the window
+            for (i = winstart; i <= winend; ++i)
+            {
+                datasize = i == lastpkt ? filesize % DATA_SIZE : DATA_SIZE;
+                data = malloc(datasize);
+                memcpy(data, databuf + (i * DATA_SIZE), datasize);
+                pkt = makePacket(TYPE_DATA, (char)i, data, datasize);
+                nbytes = sendto(sockfd, pkt, datasize + 2, 0,
+                                (struct sockaddr *)&clientaddr, clientlen);
+                if (nbytes < 0) 
+                {
+                    fprintf(stderr, "[rudpserver] Error on sendto()\n");
+                    exit(EXIT_FAILURE);
+                }
+                printf("[rudpserver] Sent packet %d of size %zu\n", i,
+                       datasize + 2);
+                free(data);
+                free(pkt);
+            }
+
+            // Read ACK from the client
+            bzero(readbuf, ACK_PKT_SIZE);
+            nbytes = recvfrom(sockfd, readbuf, ACK_PKT_SIZE, 0,
+                              (struct sockaddr *)&clientaddr, &clientlen);
+            if (nbytes < 0)
+            {
+                // timeout
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                {
+                    printf("[rudpserver] Timedout waiting for ACK %d\n",
+                           winstart);
+                    ++num_timeouts;
+
+                    if (num_timeouts == TIMEOUT_LIMIT)
+                    {
+                        printf("[rudpserver] Timeout limit reached\n");
+                        break;
+                    }
+                    else
+                        continue;
+                }
+                else
+                {
+                    fprintf(stderr, "[rudpserver] Error on recvfrom()\n");
+                    exit(EXIT_FAILURE);
+                }
+            }
+
+            // Handle ACK packet
+            if ((int)handleACK(readbuf) > ack)
+            {
+                ack = handleACK(readbuf);
+                num_timeouts = 0;
+                printf("[rudpserver] Received ACK %d\n", ack);
+            }
+            
+            // Move the window
+            winstart = ack + 1;
+        } while (ack != lastpkt);
+
+        printf("[rudpserver] Finished transferring file %s of size %ld\n",
+               filename, filesize);
+        free(readbuf);
+        free(databuf);
+        free(filename);
+
+        // Turn off timeout for receiving the next client
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 0;
+        if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout,
+            sizeof(timeout)) < 0)
+        {
+            fprintf(stderr, "[rudpserver] setsockopt() failed\n");
             exit(EXIT_FAILURE);
         }
     }
 
     close(sockfd);
-
-    free(buf);
-    free(pkt);
-    free(filename);
 
     return 0;
 }
@@ -178,12 +309,13 @@ getPortNumber(int argc, char **argv)
 }
 
 // Function  : makePacket
-// Arguments : char of type, char of sequence number, char * of data
+// Arguments : char of type, char of sequence number, void * of data, and
+//             size_t of datasize
 // Does      : makes a packet of given type. Memory is allocated as needs to be
 //             freed
 // Returns   : void * of packet
 void *
-makePacket(char type, char seqno, char *data)
+makePacket(char type, char seqno, void *data, size_t datasize)
 {
     void *pkt;
 
@@ -193,6 +325,12 @@ makePacket(char type, char seqno, char *data)
             pkt = malloc(ERROR_PKT_SIZE);
             bzero(pkt, ERROR_PKT_SIZE);
             memcpy(pkt + TYPE_IDX, &type, TYPE_SIZE);
+            break;
+        case TYPE_DATA:
+            pkt = malloc(datasize + 2); // + 2 for type and seqno
+            memcpy(pkt + TYPE_IDX, &type, TYPE_SIZE);
+            memcpy(pkt + SEQNO_IDX, &seqno, SEQNO_SIZE);
+            memcpy(pkt + DATA_IDX, data, datasize);
             break;
         default:
             break;
@@ -209,12 +347,12 @@ unsigned
 handleRRQ(void *pkt, char *filename)
 {
     char type;
-    char windowsize;
+    char winsize;
 
     bzero(filename, FILENAME_SIZE);
 
     memcpy(&type, pkt + TYPE_IDX, TYPE_SIZE);
-    memcpy(&windowsize, pkt + WINDOWSIZE_IDX, WINDOWSIZE_SIZE);
+    memcpy(&winsize, pkt + WINDOWSIZE_IDX, WINDOWSIZE_SIZE);
     memcpy(filename, pkt + FILENAME_IDX, FILENAME_SIZE);
 
     if (type != TYPE_RRQ)
@@ -223,5 +361,27 @@ handleRRQ(void *pkt, char *filename)
         exit(EXIT_FAILURE);
     }
 
-    return (unsigned)windowsize;
+    return (unsigned)winsize;
+}
+
+// Function  : handleACK
+// Arguments : void * of ACK packet
+// Does      : handles an ACK packet and validates.
+// Returns   : unsigned of ACK number
+unsigned
+handleACK(void *pkt)
+{
+    char type;
+    char ack;
+
+    memcpy(&type, pkt + TYPE_IDX, TYPE_SIZE);
+    memcpy(&ack, pkt + SEQNO_IDX, SEQNO_SIZE);
+
+    if (type != TYPE_ACK)
+    {
+        fprintf(stderr, "[rudpserver] Wrong packet that is not ACK\n");
+        exit(EXIT_FAILURE);
+    }
+
+    return (unsigned)ack;
 }
